@@ -36,10 +36,12 @@ contract TransactionWallet {
     event GetRecords(address[] UsersIndex);
     event GetUser(bytes32 name, bytes32 email, uint256 createdAt, uint userType, uint status, uint amount);
     event SendAddress(address userAddress, uint status);
+
     // User requests to add his/her account by sending in the details
     function requestToCreateAccount(bytes32 name, bytes32 email, uint userType){
        // User must not be present in the existing list of users
        require(users[msg.sender].status == 0);
+       require(userType == 1 || userType == 2);
        // Add the user in users list with status set to 1, i.e, awaitingApproval
        users[msg.sender].name = name;
        users[msg.sender].email = email;
@@ -105,7 +107,7 @@ contract TransactionWallet {
     // Transfer amount from address to wallet
     function transferToWallet() onlyApprovedUser payable {
         require (msg.value > 0);
-        users[msg.sender].amount = msg.value;
+        users[msg.sender].amount += msg.value;
         Deposit(msg.sender, this, msg.value);
     }
     // Transfer amount from one wallet to other
@@ -130,5 +132,27 @@ contract TransactionWallet {
         users[msg.sender].amount -= amount;
         msg.sender.transfer(amount);
         Deposit(this, msg.sender, amount);
+    }
+
+    // Delete account
+    function deleteAccount() onlyApprovedUser {
+      uint amount = users[msg.sender].amount;
+      // Delete the user from users mapping
+      delete (users[msg.sender]);
+      // Delete the user from usersIndex array
+      uint addressIndex;
+      for (uint i = 0; i < usersIndex.length; i++) {
+        if(usersIndex[i] == msg.sender) {
+          addressIndex = i;
+          break;
+        }
+      }
+      usersIndex[addressIndex] = usersIndex[usersIndex.length-1];
+      delete(usersIndex[usersIndex.length-1]);
+      usersIndex.length--;
+
+      // Prevent unnecessary transfer
+      require(amount > 0);
+      msg.sender.transfer(amount);
     }
 }
