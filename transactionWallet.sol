@@ -13,10 +13,44 @@ contract TransactionWallet {
         // Did not start with 0 because query on this field might result in ambiguity
         uint amount; // amount in the wallet
       }
+    mapping(address => Order[]) orders; // List of products sold by Merchant or bought by Consumer
+
+    enum State { Created, Locked, Inactive }
+
+    // This represents a single item of the given product
+    struct Item{
+        address buyer; // stores the address of the consumer who makes the purchase
+        uint amount; // the discounted amount for which the purchase was made
+        State state;  // state of the item
+      }
+
+    // This represents a single product up for sell/purchase Eg: apple
+    struct Product{
+        bytes32 productName; // name of the product
+        address merchantAddress; // address of the merchant who has kept the product for sale
+        uint actualPrice; // the actual price of the product
+        uint discountPercent; // to calculate the discounted price
+        uint quantity; // the qty of the product open for sale
+        uint countOfItems; // to maintain a count of the items which are under sell/purchase
+        // Eg: 10 units of apples, where each unit is recongnized as an item
+        mapping(uint => Item) itemList; // list of all the items under the given product
+      }
+
+    // This represents a single order the consumer has placed
+    struct Order{
+        uint productID;
+        uint itemID;
+      }
+
+    // This  declares a state variable that stores a 'Product' for each possible productID
+    mapping(uint => Product) public productDetails;
+
     // This declares a state variable that stores a 'User' struct for each possible address.
     mapping(address => User) public users;
+
     // Using this index to keep track of all the addresses and use it to easily iterate over mapping.
     address[] public usersIndex;
+
     // Constructor to assign the admin
     function TransactionWallet() {
         admin = msg.sender;
@@ -30,12 +64,23 @@ contract TransactionWallet {
         require (users[msg.sender].status == 2);
         _;
     }
+    modifier onlyMerchant() {
+      require (users[msg.sender].userType == 2);
+      _;
+    }
+    modifier onlyConsumer() {
+      require (users[msg.sender].userType == 1);
+      _;
+    }
     // Event that will be fired on changes
     event Deposit(address sender, address receiver, uint amount);
     event SendMessage(string message);
     event GetRecords(address[] UsersIndex);
     event GetUser(bytes32 name, bytes32 email, uint256 createdAt, uint userType, uint status, uint amount);
     event SendAddress(address userAddress, uint status);
+    event Aborted(uint productID);
+    event PurchaseConfirmed(uint productID, uint quantity);
+    event ItemReceived(uint productID, uint itemID);
 
     // User requests to add his/her account by sending in the details
     function requestToCreateAccount(bytes32 name, bytes32 email, uint userType){
@@ -66,6 +111,12 @@ contract TransactionWallet {
        GetUser(users[user].name, users[user].email, users[user].createdAt, users[user].userType, users[user].status, users[user].amount);
        return users[user];
     }
+
+    function fetchOrdersOfUser(address user) constant internal returns (Order[] order){
+       require(msg.sender == admin || msg.sender == user);
+       return orders[user];
+    }
+
 
     // ADMIN approves or rejects add-account requests from users
     // ADMIN supplies the list of addresses along with their status
@@ -136,12 +187,16 @@ contract TransactionWallet {
 
     // Delete account
     function deleteAccount() onlyApprovedUser {
+      // Check if the user has no pending bills to give/receive
+      for(uint i=0; i<orders[msg.sender].length; i++)
+        require(productDetails[orders[msg.sender][i].productID].itemList[orders[msg.sender][i].itemID].state == State.Inactive);
+
       uint amount = users[msg.sender].amount;
       // Delete the user from users mapping
       delete (users[msg.sender]);
       // Delete the user from usersIndex array
       uint addressIndex;
-      for (uint i = 0; i < usersIndex.length; i++) {
+      for (i = 0; i < usersIndex.length; i++) {
         if(usersIndex[i] == msg.sender) {
           addressIndex = i;
           break;
@@ -150,9 +205,116 @@ contract TransactionWallet {
       usersIndex[addressIndex] = usersIndex[usersIndex.length-1];
       delete(usersIndex[usersIndex.length-1]);
       usersIndex.length--;
-
+      SendMessage("User has been deleted");
       // Prevent unnecessary transfer
       require(amount > 0);
       msg.sender.transfer(amount);
     }
+
+    // Add a product to display in the wallet for the consumers to buy
+    function addProduct(uint productID, bytes32 productName, uint actualPrice, uint discountPercent, uint quantity)
+      onlyApprovedUser onlyMerchant {
+      // Check if the product does not already exist
+      var product = productDetails[productID];
+      require(product.actualPrice == 0);
+      // Actual Price should not be 0 as this is the base condition for checking the exitence of the product
+      require(actualPrice != 0);
+      // Check if the seller has enough money in the wallet to pay for the product, so to hold his side of the bargain
+      require(users[msg.sender].amount >= ((2*actualPrice*quantity)* 1 ether));
+
+      // Add the product
+      product.productName = productName;
+      product.merchantAddress = msg.sender;
+      product.actualPrice = actualPrice* 1 ether;
+      product.discountPercent = discountPercent;
+      product.quantity = quantity;
+
+      // Update the wallet
+      users[msg.sender].amount -= (2*actualPrice*quantity)* 1 ether;
+      SendMessage("Product is added");
+
+    }
+
+    // Update the product
+    function updateProduct(uint productID, bytes32 productName, uint actualPrice, uint discountPercent, uint quantity)
+      onlyApprovedUser onlyMerchant {
+      // Check if the product exists and the updater is the authorized person
+      var product = productDetails[productID];
+      require((product.actualPrice != 0) && (product.merchantAddress == msg.sender));
+      // Transfer money from/to wallet depending on the change in actualPrice/quantity
+      uint newAmount = 2*actualPrice*quantity* 1 ether;
+      uint oldAmount = 2*product.actualPrice*product.quantity;
+      uint difference = newAmount - oldAmount;
+      if(newAmount > oldAmount)
+        require(difference <= users[msg.sender].amount);
+
+      // Update the product
+      product.productName = productName;
+      product.actualPrice = actualPrice* 1 ether;
+      product.discountPercent = discountPercent;
+      product.quantity = quantity;
+
+      // Update the wallet
+      if(difference > 0)
+        users[msg.sender].amount -= difference;
+      else if (difference < 0)
+        users[msg.sender].amount += difference;
+
+      SendMessage("Product is updated");
+      }
+
+      // Delete a product
+      function deleteProduct(uint productID) onlyApprovedUser onlyMerchant {
+        // Check if the product exists and the deleter is the authorized person
+        var product = productDetails[productID];
+        require((product.actualPrice != 0) && (product.merchantAddress == msg.sender));
+        // Check if there are no items
+        require(product.countOfItems == 0);
+        // Save the amount
+        uint amount = 2*product.actualPrice*product.quantity;
+        // Delete the product from the list
+        delete (productDetails[productID]);
+        // Update the wallet
+        users[msg.sender].amount += amount;
+        Aborted(productID);
+      }
+
+      // Buy a product and specify the quantity
+      function buyProduct(uint productID, uint quantity) onlyApprovedUser onlyConsumer {
+        require(quantity > 0);
+        // Check if the product exists and quantity is sufficient
+        var product = productDetails[productID];
+        require((product.actualPrice != 0) && (product.quantity >= quantity));
+        // Check if the consumer has sufficient ethers in wallet to make the purchase
+        uint discountAmount = ((100 - product.discountPercent)*product.actualPrice) / 100;
+        require(users[msg.sender].amount >= 2*discountAmount*quantity);
+        // Update the itemList and orderList
+        uint itemID;
+        for(uint i=1; i<=quantity; i++) {
+          itemID = product.countOfItems;
+          product.itemList[itemID] = Item({buyer: msg.sender, amount: discountAmount, state: State.Locked});
+          orders[msg.sender].push(Order({productID: productID, itemID: itemID}));
+          orders[product.merchantAddress].push(Order({productID: productID, itemID: itemID}));
+          product.countOfItems++;
+        }
+        product.quantity -= quantity;
+        // Update the wallet
+        users[msg.sender].amount -= 2*discountAmount*quantity;
+        PurchaseConfirmed(productID, quantity);
+      }
+
+      // The consumer confirms on receiving the product by giving productID and itemID
+      function confirmReceived(uint productID, uint itemID) onlyApprovedUser onlyConsumer {
+        var item = productDetails[productID].itemList[itemID];
+        // Check if the product exists and is bought by the same person
+        require((item.state == State.Locked) && (item.buyer == msg.sender));
+
+        ItemReceived(productID, itemID);
+        // Update the status of the item
+        item.state = State.Inactive;
+        // Update the wallet of both seller and buyer
+        users[msg.sender].amount += item.amount;
+        users[productDetails[productID].merchantAddress].amount += 2*productDetails[productID].actualPrice;
+  }
+
 }
